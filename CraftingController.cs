@@ -107,22 +107,20 @@ namespace Oxide.Plugins
         private const string permsetbenchlvl = "craftingcontroller.setbenchlvl";
         private const string permsetskins = "craftingcontroller.setskins";
 
-        private List<string> permissions = new List<string> { perminstantbulkcraft, permblockitems, permitemrate, permcraftingrate, permsetbenchlvl, permsetskins };
-        private List<string> permissionsBonusMultiplier = new List<string>();
-        private List<string> commands = new List<string> { nameof(CommandCraftingRate), nameof(CommandCraftTime), nameof(CommandBlockItem), nameof(CommandUnblockItem), nameof(CommandSetDefaultSkin), nameof(CommandWorkbenchLVL) };
+        private readonly List<string> permissions = new List<string> { perminstantbulkcraft, permblockitems, permitemrate, permcraftingrate, permsetbenchlvl, permsetskins };
+        private readonly List<string> commands = new List<string> { nameof(CommandCraftingRate), nameof(CommandCraftTime), nameof(CommandBlockItem), nameof(CommandUnblockItem), nameof(CommandSetDefaultSkin), nameof(CommandWorkbenchLVL) };
         private void OnServerInitialized()
         {
             //Set default stats for unload
             BackupDefaultBPs();
 
-            foreach (var key in config.BonusMultiplier.Keys)
-            {
-                permissionsBonusMultiplier.Add("craftingcontroller." + key);
-            }
-
             //register permissions
             permissions.ForEach(perm => permission.RegisterPermission(perm, this));
-            permissionsBonusMultiplier.ForEach(perm => permission.RegisterPermission(perm, this));
+            foreach (var entry in config.BonusMultiplier)
+            {
+                permission.RegisterPermission($"craftingcontroller.{entry.Key}", this);
+            }
+
             //register commands
             commands.ForEach(command => AddLocalizedCommand(command));
 
@@ -132,12 +130,25 @@ namespace Oxide.Plugins
                 Unsubscribe("OnItemCraftFinished");
                 Unsubscribe("OnItemCraftCancelled");
             }
-            ItemManager.bpList.ForEach(item => {
-                if (!config.CraftingOptions.ContainsKey(item.targetItem.shortname))
-                    config.CraftingOptions.Add(item.targetItem.shortname, new CraftingData() { craftTime = item.time, workbenchLevel = item.workbenchLevelRequired, canCraft = item.userCraftable, canResearch = item.isResearchable });
+
+            bool configChanged = false;
+            ItemManager.bpList.ForEach(item =>
+            {
+                if (config.CraftingOptions.ContainsKey(item.targetItem.shortname)) return;
+
+                config.CraftingOptions.Add(item.targetItem.shortname, new CraftingData()
+                {
+                    craftTime = item.time,
+                    workbenchLevel = item.workbenchLevelRequired,
+                    canCraft = item.userCraftable,
+                    canResearch = item.isResearchable
+                });
+                configChanged = true;
             });
 
-            SaveConfig();
+            if (configChanged)
+                SaveConfig();
+
             UpdateCraftingRate();
         }
 
@@ -275,8 +286,10 @@ namespace Oxide.Plugins
 
                 craftingdata.craftTime = defaultsetup[setitem.Blueprint.name].craftTime / (config.CraftingRateMultiplier);
                 craftingdata.useCustomCraftTime = false;
+                config.CraftingOptions[setitem.shortname] = craftingdata;
 
-                Message(iplayer, "ItemCraftTimeSet", setitem.shortname, (setitem.Blueprint.time).ToString());
+                SetCraftTime(setitem.Blueprint, defaultsetup[setitem.Blueprint.name].craftTime / (config.CraftingRateMultiplier == 0f ? 1f : config.CraftingRateMultiplier));
+                Message(iplayer, "ItemCraftTimeSet", setitem.shortname, setitem.Blueprint.time.ToString());
                 if (config.SaveCommands) SaveConfig();
                 return;
             }
@@ -291,6 +304,7 @@ namespace Oxide.Plugins
 
             craftingdata1.craftTime = crafttime;
             craftingdata1.useCustomCraftTime = true;
+            config.CraftingOptions[setitem.shortname] = craftingdata1;
 
             ItemBlueprint bp = ItemManager.itemDictionaryByName[setitem.shortname].Blueprint;
             SetCraftTime(bp, crafttime);
@@ -321,6 +335,7 @@ namespace Oxide.Plugins
             {
                 craftingdata.canCraft = false;
                 craftingdata.canResearch = false;
+                config.CraftingOptions[blockitem.shortname] = craftingdata;
             }
             ItemBlueprint bp = ItemManager.itemDictionaryByName[blockitem.shortname].Blueprint;
             bp.userCraftable = false;
@@ -351,6 +366,7 @@ namespace Oxide.Plugins
                 return;
             craftingdata.canCraft = true;
             craftingdata.canResearch = true;
+            config.CraftingOptions[blockitem.shortname] = craftingdata;
             ItemBlueprint bp = ItemManager.itemDictionaryByName[blockitem.shortname].Blueprint;
             bp.userCraftable = true;
             bp.isResearchable = true;
@@ -389,6 +405,7 @@ namespace Oxide.Plugins
             if (!config.CraftingOptions.TryGetValue(item.shortname, out CraftingData craftingdata))
                 return;
             craftingdata.workbenchLevel = benchlvl;
+            config.CraftingOptions[item.shortname] = craftingdata;
             ItemBlueprint bp = ItemManager.itemDictionaryByName[item.shortname].Blueprint;
             bp.workbenchLevelRequired = benchlvl;
             Message(iplayer, "WorkbenchLevelSet", item.shortname, benchlvl.ToString());
@@ -421,6 +438,7 @@ namespace Oxide.Plugins
             if (!config.CraftingOptions.TryGetValue(setitem.shortname, out CraftingData craftingdata))
                 return;
             craftingdata.defaultskinid = skinid;
+            config.CraftingOptions[setitem.shortname] = craftingdata;
             Message(iplayer, "SkinSet", setitem.shortname, skinid.ToString());
             if (config.SaveCommands) SaveConfig();
         }
@@ -509,8 +527,10 @@ namespace Oxide.Plugins
 
         private object OnItemCraft(ItemCraftTask task, BasePlayer player, Item fromTempBlueprint)
         {
+            if (task == null || task.blueprint == null || task.amount == 0) return null;
+
             var target = task.blueprint.targetItem;
-            if (task == null || target == null || task?.instanceData?.dataInt != null || task?.amount == 0) return null;
+            if (target == null || task.instanceData?.dataInt != null) return null;
             var stacks = GetStacks(target, task.amount * task.blueprint.amountToCreate);
             ulong defaultskin = 0uL;
             int freeslots = FreeSlots(player);
@@ -577,20 +597,20 @@ namespace Oxide.Plugins
                     task.skinID = (int)defaultskin;
             }
 
-            float bonusperm_time = 1;
-            foreach (var bonusperm in permissionsBonusMultiplier)
+            float bonuspermTime = 1f;
+            foreach (var entry in config.BonusMultiplier)
             {
-                if (!HasPerm(player.UserIDString, $"{bonusperm}")) continue;
-                string bonuspermname = bonusperm.Split('.')[1];
-                if (bonusperm_time < (float)config.BonusMultiplier[bonuspermname]) continue;
+                float multiplier = entry.Value;
+                if (multiplier <= bonuspermTime) continue;
+                if (!HasPerm(player.UserIDString, $"craftingcontroller.{entry.Key}")) continue;
 
-                bonusperm_time = (float)config.BonusMultiplier[bonuspermname];
+                bonuspermTime = multiplier;
             }
 
-            if (bonusperm_time != float.MaxValue)
+            if (bonuspermTime > 1f)
             {
                 task.blueprint = UnityEngine.Object.Instantiate(task.blueprint);
-                task.blueprint.time /= bonusperm_time;
+                task.blueprint.time /= bonuspermTime;
             }
 
             if (task.blueprint.time == 0f || HasPerm(player.UserIDString, perminstantbulkcraft))
